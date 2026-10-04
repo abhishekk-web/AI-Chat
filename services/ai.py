@@ -7,6 +7,7 @@ from database.connection import conversations, messages, users
 from datetime import datetime
 from bson import ObjectId
 from dependencies.auth import hash_password, verify_password, create_token
+from fastapi.responses import StreamingResponse
 
 load_dotenv()
 
@@ -35,7 +36,8 @@ def sign_up_service(data):
         obj = {
             "name": data.name,
             "email": data.email,
-            "password": data.password
+            "password": data.password,
+            "created_at": datetime.now(),
         }
     
         create_user = users.insert_one(obj)
@@ -77,16 +79,17 @@ def login_service(data):
         "token": token
     }
 
-def chat_request_service(data):
+def chat_request_service(data, user_data):
 
     try:
 
         print("chat request body is ",data)
+        print("user data is ",user_data)
 
         content = data.question
         if data.conversation_id is not None:
 
-            check_conversation_id = conversations.find_one({"_id": ObjectId(data.conversation_id)})
+            check_conversation_id = conversations.find_one({"_id": ObjectId(data.conversation_id), "user_id": ObjectId(user_data["_id"])})
             if check_conversation_id is None:
                 raise HTTPException(
                     status_code=404,
@@ -129,7 +132,8 @@ def chat_request_service(data):
         else:
             conversation_data = conversations.insert_one({
                 "title": data.question,
-                "created_at": datetime.now()
+                "created_at": datetime.now(),
+                "user_id": user_data["_id"]
             })
             conversation_id = conversation_data.inserted_id
 
@@ -145,12 +149,14 @@ def chat_request_service(data):
         message_data = messages.insert_many([
             {
                 "conversation_id": conversation_id,
+                "user_id": user_data["_id"],
                 "role": "user",
                 "content": data.question,
                 "created_at": datetime.now()
             },
             {
                 "conversation_id": conversation_id,
+                "user_id": user_data["_id"],
                 "role": "model",
                 "content": response.text,
                 "created_at": datetime.now()
@@ -169,14 +175,14 @@ def chat_request_service(data):
             detail="AI service temporarily unavailable"
         )
 
-def list_history_service(conversation_id):
+def list_history_service_by_id(conversation_id, user_data):
     try:
 
-       
         messages_data = list(conversations.aggregate([
             {
                 "$match": {
-                    "_id": ObjectId(conversation_id)
+                    "_id": ObjectId(conversation_id),
+                    "user_id": ObjectId(user_data["_id"])
                 }
             },
             {
@@ -207,12 +213,7 @@ def list_history_service(conversation_id):
                 "as": "messages"
             }
         },
-            # {
-            #     "$unwind": {
-            #         "path": "$conversation",
-            #         "preserveNullAndEmptyArrays": True
-            #     }
-            # },
+
             {
                 "$project": {
                     "_id": 0,
@@ -231,3 +232,152 @@ def list_history_service(conversation_id):
 
     except ValueError as error:
         print(error)
+
+def list_history_service(user_data):
+    try:
+        conversation_data = list(
+            conversations.aggregate([
+                {
+                    "$match": {
+                        "user_id": user_data["_id"]
+                    }
+                }
+            ])
+        )
+
+        print("conversation data is  ",conversation_data)
+
+        for conversation in conversation_data:
+            # print("conversation is ",conversation)
+            conversation["_id"] = str(conversation["_id"])
+            conversation["user_id"] = str(conversation["user_id"])
+
+ 
+        return conversation_data
+
+    except ValueError as error:
+        print(error)
+
+
+def delete_history_service(conversation_id, user_data):
+    try:
+
+        conversation_data = conversations.find_one({"_id": ObjectId(conversation_id), "user_id": ObjectId(user_data._id)})
+        if conversation_data is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Conversation id not exist"
+            )
+        
+        conversation_list =  conversations.delete_one({"_id": ObjectId(conversation_id), "user_id": ObjectId(user_data["_id"])})
+        messages_list =messages.delete_many({"conversation_id": ObjectId(conversation_id), "user_id": ObjectId(user_data["_id"])})
+        # print("messages data is ",messages_data)
+        if conversation_list.deleted_count == 0:
+            raise HTTPException(
+                status_code=404,
+                detail="User not found"
+            )
+        if messages_list.deleted_count == 0:
+            raise HTTPException(
+                status_code=404,
+                detail="User not found"
+            )
+
+        return "Chat has been successfully deleted"
+
+    except ValueError as error:
+        print(error)
+
+
+def chat_stream_service(data, user_data):
+    try:
+        print("user_data ",user_data)
+        print("data checking is ",data)
+
+        content = data.question
+        if data and data.conversation_id is not None:
+
+            conversation_id = ObjectId(data.conversation_id)
+            conversation_data = conversations.find_one({"_id": ObjectId(data.conversation_id)})
+            if conversation_data is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="conversation not exist"
+                )
+
+            messages_data = messages.find({"conversation_id": ObjectId(data.conversation_id)}).sort("created_at", 1)
+            
+            content = [
+                {
+                    "role": messages["role"],
+                    "parts": [
+                        {
+                            "text": messages["content"]
+                        }
+                    ]
+                }
+                for messages in messages_data   
+            ] 
+
+            content.append({
+                "role": "user",
+                "parts": [
+                    {
+                        "text": data.question
+                    }
+                ]
+            })
+
+        else: 
+            conversation_data = conversations.insert_one({
+                "title": data.question,
+                "created_at": datetime.now(),
+                "user_id": user_data["_id"]
+            })
+            conversation_id = conversation_data.inserted_id
+
+        response = client.models.generate_content_stream(
+            model="gemini-3.5-flash-lite",
+            contents=content
+        )
+
+        try:
+            full_response = ""
+            for chunk in response:
+                if chunk.text:
+                    full_response += chunk.text
+                    yield chunk.text
+        except errors.ServerError:
+            raise HTTPException(
+                status_code=503,
+                detail="Ai service temporarily unavailable"
+            )
+            
+
+        messages.insert_many([
+            {
+                "conversation_id": conversation_id,
+                "user_id": user_data["_id"],
+                "role": "user",
+                "content": data.question,
+                "created_at": datetime.now()
+            },
+            {
+                "conversation_id": conversation_id,
+                "user_id": user_data["_id"],
+                "role": "model",
+                "content": full_response,
+                "created_at": datetime.now()
+            }
+        ])
+
+        
+
+        # return response.text
+
+    except errors.ServerError as error:
+        print("error checking is ",error)
+        raise HTTPException(
+            status_code=503,
+            detail="AI service temporarily unavailable"
+        )
