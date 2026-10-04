@@ -3,9 +3,10 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import errors
 from fastapi import HTTPException
-from database.connection import conversations, messages
+from database.connection import conversations, messages, users
 from datetime import datetime
 from bson import ObjectId
+from dependencies.auth import hash_password, verify_password, create_token
 
 load_dotenv()
 
@@ -15,6 +16,67 @@ client = genai.Client(api_key=api_key)
 
 print("Gemini connected!")
 
+def sign_up_service(data):
+    try:
+
+        print("data body is ",data)
+        if data.email:
+            check_email = users.find_one({"email": data.email})
+            if check_email is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Email already exist"
+                )
+        
+        if data.password:
+            hashed_password = hash_password(data.password)
+            data.password = hashed_password
+    
+        obj = {
+            "name": data.name,
+            "email": data.email,
+            "password": data.password
+        }
+    
+        create_user = users.insert_one(obj)
+    
+        print("create user is ",create_user)
+        token = create_token(str(create_user.inserted_id))
+        print("token checking is ",token)
+        get_user = users.find_one({"_id": create_user.inserted_id})
+        get_user["_id"] = str(get_user["_id"])        
+        return {
+            "data": get_user,
+            "token": token
+        }
+
+    except ValueError as error:
+        print(error)
+
+def login_service(data):
+    print("body login checking ",data)
+    if data.email:
+        check_email = users.find_one({"email": data.email})
+        if check_email is None:
+            raise HTTPException(
+                status_code=404,
+                detail="email not exist"
+            )
+
+    if data.password:
+        verifying_password = verify_password(data.password, check_email["password"])
+        if verifying_password is False:
+            raise HTTPException(
+                status_code=400,
+                detail="password not matched"
+            )
+
+    token = create_token(str(check_email["_id"]))
+    return {
+        "data": check_email,
+        "token": token
+    }
+
 def chat_request_service(data):
 
     try:
@@ -23,6 +85,13 @@ def chat_request_service(data):
 
         content = data.question
         if data.conversation_id is not None:
+
+            check_conversation_id = conversations.find_one({"_id": ObjectId(data.conversation_id)})
+            if check_conversation_id is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="conversation id not found"
+                )
 
             conversation_id = ObjectId(data.conversation_id)
             print("conversation_data ",conversation_id)
