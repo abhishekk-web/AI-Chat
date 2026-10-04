@@ -1,10 +1,12 @@
 from fastapi import APIRouter
+from typing import Optional
 from pydantic import BaseModel, Field, field_validator
-from services.ai import chat_request_service
+from services.ai import chat_request_service, list_history_service
 
 router = APIRouter()
 
 class chatRequest (BaseModel):
+    conversation_id: Optional[str] = None
     question: str = Field(..., min_length=1)
     @field_validator("question")
     @classmethod
@@ -15,8 +17,8 @@ class chatRequest (BaseModel):
 
 @router.post("/ai/chat")
 def chat(chatRequest: chatRequest):
-    print("chat request is ",chatRequest)
     return chat_request_service(chatRequest)
-    # return {
-    #     "message": "AI chat endpoint"
-    # }
+
+@router.get("/list_history/{conversation_id}")
+def list_history(conversation_id):
+    return list_history_service(conversation_id)
